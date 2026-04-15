@@ -171,11 +171,16 @@ class AgentNodes:
 
     @staticmethod
     def writer(state: AgentState) -> AgentState:
-        """Uses LLM to write the message"""
+        """Uses LLM to write the message, or revise it based on feedback."""
 
         if not state.strategy:
             state.status = Status.PLANNING
             return state
+
+        # --- NEW: Check if this is a revision call and get the feedback ---
+        is_revision = state.status == Status.REVISING
+        previous_draft = state.draft.body if is_revision and state.draft else None
+        feedback = state.next_action.get("feedback") if is_revision and state.next_action else None
 
         try:
             message_data = llm_service.write_message(
@@ -189,15 +194,18 @@ class AgentNodes:
                 channel=state.channel,
                 intent=state.intent,
                 stage=state.stage,
-                # NEW: Pass contact history so writer can adjust tone
-                # e.g. second message should reference first, third should be more direct
                 times_contacted_before=state.memory.get("times_contacted_before", 0),
-                last_message_sent=state.memory.get("prospect_record", {}).get("last_message_sent")
+                last_message_sent=state.memory.get("prospect_record", {}).get("last_message_sent"),
+                
+                # --- NEW: Pass the revision context to the LLM service ---
+                is_revision=is_revision,
+                previous_draft=previous_draft,
+                feedback_from_critic=feedback
             )
 
             state.llm_calls.append({
                 "step": "writer",
-                "purpose": "write_message",
+                "purpose": "write_message (revision)" if is_revision else "write_message (first_draft)",
                 "output": message_data
             })
 
@@ -234,109 +242,72 @@ class AgentNodes:
         state.status = Status.VALIDATING
         return state
 
+    # --- UPDATED critic FUNCTION ---
     @staticmethod
     def critic(state: AgentState) -> AgentState:
-        """Uses LLM to validate the message"""
+        """Uses LLM to validate the message and decides on refinement."""
 
         if not state.draft:
             state.status = Status.PLANNING
             return state
 
         try:
+            # This part is unchanged - it just calls the LLM
             validation_result = llm_service.validate_message(
                 message=state.draft.body,
                 prospect_name=state.target_prospect,
                 channel=state.channel,
                 personality=state.personality
             )
-
-            state.llm_calls.append({
-                "step": "critic",
-                "purpose": "validate_message",
-                "output": validation_result
-            })
-
-            # Extra check for creepy content
+            state.llm_calls.append({"step": "critic", "purpose": "validate_message", "output": validation_result})
             if ReasoningTools.detect_overpersonalization(state.draft.body):
                 validation_result["warnings"].append("Overpersonalization detected")
                 validation_result["score"] = max(0, validation_result["score"] - 20)
                 validation_result["valid"] = False
-
-            # Extra check for banned phrases
             for phrase in state.personality.never_use_phrases:
                 if phrase.lower() in state.draft.body.lower():
                     validation_result["warnings"].append(f"Banned phrase found: '{phrase}'")
                     validation_result["score"] = max(0, validation_result["score"] - 10)
                     validation_result["valid"] = False
-
-            state.validation = Validation(
-                valid=validation_result.get("valid", False),
-                score=validation_result.get("score", 0),
-                warnings=validation_result.get("warnings", []),
-                suggested_fixes=validation_result.get("suggested_fixes")
-            )
-
+            state.validation = Validation(**validation_result)
         except Exception as e:
-            state.validation = Validation(
-                valid=True,
-                score=75,
-                warnings=["Validation LLM call failed, using basic checks"],
-                suggested_fixes=None
-            )
+            state.validation = Validation(valid=True, score=75, warnings=["Validation LLM call failed, using basic checks"], suggested_fixes=None)
             state.memory["critic_error"] = str(e)
 
+        # --- UPDATED: Refinement Logic ---
+
+        # Case 1: Validation passed
         if state.validation.valid:
             state.status = Status.COMPLETE
-            state.next_action = {
-                "type": ActionType.SAVE_DRAFT,
-                "reason": f"Score: {state.validation.score}"
-            }
-
-            # --- NEW: Record everything in memory after successful generation ---
-
-            # Record in prospect memory
-            MemoryService.prospects.record_outreach(
-                name=state.target_prospect,
-                company=state.target_company,
-                channel=state.channel.value,
-                stage=state.stage.value,
-                hook_used=state.strategy.primary_hook if state.strategy else "",
-                angle_used=state.strategy.angle if state.strategy else "",
-                offer_name=state.selected_offer.offer_name if state.selected_offer else "",
-                message_sent=state.draft.body if state.draft else ""
-            )
-
-            # Record in learning memory
-            MemoryService.learning.record_generation(
-                quality_score=state.validation.score,
-                channel=state.channel.value,
-                stage=state.stage.value,
-                template=state.personality.base_template.value
-            )
-
-            # Record in offer memory
+            state.next_action = {"type": ActionType.SAVE_DRAFT, "reason": f"Score: {state.validation.score}"}
+            
+            # Record everything in memory
+            MemoryService.prospects.record_outreach(name=state.target_prospect, company=state.target_company, channel=state.channel.value, stage=state.stage.value, hook_used=state.strategy.primary_hook if state.strategy else "", angle_used=state.strategy.angle if state.strategy else "", offer_name=state.selected_offer.offer_name if state.selected_offer else "", message_sent=state.draft.body if state.draft else "")
+            MemoryService.learning.record_generation(quality_score=state.validation.score, channel=state.channel.value, stage=state.stage.value, template=state.personality.base_template.value)
             if state.selected_offer:
-                MemoryService.offers.record_usage(
-                    offer_name=state.selected_offer.offer_name,
-                    channel=state.channel.value,
-                    angle=state.strategy.angle if state.strategy else "",
-                    prospect_role=state.prospect_role,
-                    quality_score=state.validation.score
-                )
+                MemoryService.offers.record_usage(offer_name=state.selected_offer.offer_name, channel=state.channel.value, angle=state.strategy.angle if state.strategy else "", prospect_role=state.prospect_role, quality_score=state.validation.score)
 
-        elif state.iteration_count < state.max_iterations:
-            state.status = Status.PLANNING
+        # Case 2: Validation failed, but we have specific fixes to try (and haven't hit max retries)
+        elif state.validation.suggested_fixes and state.iteration_count < state.max_iterations:
+            state.status = Status.REVISING  # Tell the orchestrator to go back to the writer
             state.iteration_count += 1
-            state.draft = None
             state.next_action = {
                 "type": ActionType.RETRY,
-                "reason": f"Score {state.validation.score} too low, retrying"
+                "reason": f"Validation failed (score: {state.validation.score}). Attempting revision.",
+                "feedback": state.validation.suggested_fixes # This is the crucial part
             }
+            # We do NOT clear state.draft, the writer needs it to revise
+
+        # Case 3: Validation failed badly, or we're out of retries. Start over from scratch.
         else:
-            state.status = Status.FAILED
-            state.next_action = {
-                "type": ActionType.ABORT,
-                "reason": f"Max iterations hit, final score: {state.validation.score}"
-            }
+            if state.iteration_count >= state.max_iterations:
+                state.status = Status.FAILED
+                state.next_action = {"type": ActionType.ABORT, "reason": f"Max iterations hit, final score: {state.validation.score}"}
+            else: # Major failure with no suggested fixes
+                state.status = Status.PLANNING
+                state.iteration_count += 1
+                state.draft = None # Clear draft for a full rewrite
+                state.strategy = None # Clear strategy, it might have been the problem
+                state.next_action = {"type": ActionType.RETRY, "reason": f"Major failure (score {state.validation.score}), planning full retry."}
 
         return state

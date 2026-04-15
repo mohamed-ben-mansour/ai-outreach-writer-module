@@ -11,6 +11,7 @@ class Status(str, Enum):
     RESEARCHING = "researching"
     STRATEGIZING = "strategizing"
     WRITING = "writing"
+    REVISING = "revising" 
     VALIDATING = "validating"
     COMPLETE = "complete"
     FAILED = "failed"

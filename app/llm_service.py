@@ -719,14 +719,35 @@ Return JSON: {{"angle": "...", "reasoning": "..."}}"""
         intent: Intent,
         stage: Stage,
         times_contacted_before: int = 0,
-        last_message_sent: Optional[str] = None
+        last_message_sent: Optional[str] = None,
+        # --- NEW PARAMETERS FOR REVISION ---
+        is_revision: bool = False,
+        previous_draft: Optional[str] = None,
+        feedback_from_critic: Optional[str] = None
     ) -> Dict[str, Any]:
         channel_limits = {Channel.LINKEDIN_DM: (50, 300), Channel.LINKEDIN_INMAIL: (100, 600), Channel.EMAIL: (100, 800), Channel.TWITTER_DM: (20, 280), Channel.SMS: (20, 160)}
         min_len, max_len = channel_limits.get(channel, (50, 300))
         include_subject = channel in [Channel.LINKEDIN_INMAIL, Channel.EMAIL]
         role_context = f"({prospect_role})" if prospect_role else ""
         memory_block = self._build_memory_block(times_contacted_before, last_message_sent)
+
+        # --- NEW: Build the revision block if applicable ---
+        revision_block = ""
+        if is_revision and previous_draft and feedback_from_critic:
+            revision_block = f"""
+REVISION REQUIRED:
+Your previous attempt was rejected.
+PREVIOUS DRAFT:
+"{previous_draft}"
+
+REASON FOR REJECTION / FEEDBACK TO IMPLEMENT:
+"{feedback_from_critic}"
+
+You MUST fix the issues mentioned in the feedback. Create a better, revised version that incorporates the suggestions. Do not repeat the same mistakes.
+"""
+        
         prompt = f"""You are writing a personalized outreach message.
+{revision_block}
 TARGET: {prospect_name} {role_context} at {company}
 STRATEGY:
 - Primary Hook: {strategy.primary_hook}
@@ -754,6 +775,7 @@ Return JSON: {{"body": "...", "subject": {"\"...\"" if include_subject else "nul
             fallback = f"Hi {prospect_name}, came across your work at {company} and wanted to connect."
             return {"body": fallback, "subject": None, "sentence_breakdown": [{"text": fallback, "purpose": "general", "driven_by": ["fallback"]}], "error": str(e)}
 
+    # --- UNCHANGED validate_message FUNCTION ---
     def validate_message(
         self,
         message: str,
@@ -761,6 +783,8 @@ Return JSON: {{"body": "...", "subject": {"\"...\"" if include_subject else "nul
         channel: Channel,
         personality: Personality
     ) -> Dict[str, Any]:
+        # This function is fine, no changes needed for this task
+        # Using your exact existing code
         channel_limits = {Channel.LINKEDIN_DM: (50, 300), Channel.LINKEDIN_INMAIL: (100, 600), Channel.EMAIL: (100, 800), Channel.TWITTER_DM: (20, 280), Channel.SMS: (20, 160)}
         min_len, max_len = channel_limits.get(channel, (50, 300))
         banned = ', '.join(personality.never_use_phrases) if personality.never_use_phrases else "none"

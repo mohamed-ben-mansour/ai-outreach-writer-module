@@ -46,6 +46,8 @@ class PipelineOrchestrator:
             self.state = AgentNodes.strategist(self.state)
         elif self.state.status == Status.WRITING:
             self.state = AgentNodes.writer(self.state)
+        elif self.state.status == Status.REVISING:
+            self.state = AgentNodes.writer(self.state) # Send it back to the writer
         elif self.state.status == Status.VALIDATING:
             self.state = AgentNodes.critic(self.state)
 
