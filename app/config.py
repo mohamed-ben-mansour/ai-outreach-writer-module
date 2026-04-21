@@ -33,6 +33,15 @@ class Settings(BaseSettings):
     ENABLE_HUMAN_REVIEW: bool = False
     ENABLE_AUTO_SEND: bool = False
     ENABLE_LEARNING_LOOP: bool = False
+
+    # Gmail SMTP (free email sending)
+    GMAIL_ADDRESS: Optional[str] = None
+    GMAIL_APP_PASSWORD: Optional[str] = None
+
+    # Unipile (LinkedIn sending)
+    UNIPILE_API_KEY: Optional[str] = None
+    UNIPILE_DSN: Optional[str] = None          # e.g. "api4.unipile.com:13465"
+    UNIPILE_DEFAULT_ACCOUNT_ID: Optional[str] = None  # your connected LinkedIn account ID
     
     # Logging
     LOG_LEVEL: str = "INFO"

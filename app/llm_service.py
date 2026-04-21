@@ -643,6 +643,29 @@ class LLMService:
         intent_rules = {Intent.DIRECT_OUTREACH: "Respect their time.", Intent.FOLLOW_UP: "Reference past interaction.", Intent.REFERRAL: "Lead with mutual connection.", Intent.RE_ENGAGEMENT: "Acknowledge the gap.", Intent.EVENT_BASED: "Reference the trigger."}
         return "\n".join([f"CHANNEL RULES: {channel_rules.get(channel, '')}", f"STAGE RULES: {stage_rules.get(stage, '')}", f"INTENT RULES: {intent_rules.get(intent, '')}"])
 
+    def _build_voice_block(self, voice_samples: List[str]) -> str:
+        """
+        Build a voice-matching block from the sender's past messages.
+        Tells the LLM to extract and replicate their natural writing patterns.
+        """
+        if not voice_samples:
+            return ""
+
+        samples_text = "\n".join(
+            f"  Sample {i+1}: \"{s.strip()}\""
+            for i, s in enumerate(voice_samples[:5])  # cap at 5
+        )
+        return f"""SENDER VOICE — CRITICAL: Study these real messages written by the sender and match their style exactly.
+{samples_text}
+Extract and replicate:
+- Their sentence length and rhythm (short punchy vs longer flowing)
+- Punctuation habits (do they use em dashes, ellipses, exclamation marks or avoid them?)
+- Vocabulary level (casual slang, professional, technical?)
+- How they open (do they jump straight in or warm up first?)
+- How they close (soft question, direct ask, statement?)
+- Any recurring phrases or patterns unique to them
+The final message must sound like IT WAS WRITTEN BY THIS SPECIFIC PERSON, not a generic AI copywriter."""
+
     def _build_memory_block(self, times_contacted_before: int, last_message_sent: Optional[str]) -> str:
         """Convert memory data into instructions for the LLM"""
         lines = []
@@ -739,7 +762,6 @@ Return JSON: {{"angle": "...", "reasoning": "..."}}"""
         stage: Stage,
         times_contacted_before: int = 0,
         last_message_sent: Optional[str] = None,
-        # --- NEW PARAMETERS FOR REVISION ---
         is_revision: bool = False,
         previous_draft: Optional[str] = None,
         feedback_from_critic: Optional[str] = None
@@ -749,6 +771,7 @@ Return JSON: {{"angle": "...", "reasoning": "..."}}"""
         include_subject = channel in [Channel.LINKEDIN_INMAIL, Channel.EMAIL]
         role_context = f"({prospect_role})" if prospect_role else ""
         memory_block = self._build_memory_block(times_contacted_before, last_message_sent)
+        voice_block = self._build_voice_block(personality.voice_samples)
 
         # --- NEW: Build the revision block if applicable ---
         revision_block = ""
@@ -761,6 +784,7 @@ Fix exactly what the feedback says. Do not change anything else. Do not rewrite 
         
         prompt = f"""Write a personalized outreach message.
 {revision_block}
+{voice_block}
 TARGET: {prospect_name} {role_context} at {company}
 HOOK: {strategy.primary_hook} | ANGLE: {strategy.angle}
 STYLE: {personality.base_template.value} | URGENCY: {personality.urgency_level}/10 | HUMOR: {personality.humor_sarcasm}/10

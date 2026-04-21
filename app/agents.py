@@ -294,10 +294,18 @@ class AgentNodes:
 
         # Case 1: Validation passed
         if state.validation.valid:
-            state.status = Status.COMPLETE
-            state.next_action = {"type": ActionType.SAVE_DRAFT, "reason": f"Score: {state.validation.score}"}
-            
-            # Record everything in memory
+            # If human review is enabled, pause here instead of completing
+            if settings.ENABLE_HUMAN_REVIEW:
+                state.status = Status.AWAITING_HUMAN
+                state.next_action = {
+                    "type": ActionType.HUMAN_REVIEW,
+                    "reason": f"Message approved by critic (score: {state.validation.score}). Awaiting human decision."
+                }
+            else:
+                state.status = Status.COMPLETE
+                state.next_action = {"type": ActionType.SAVE_DRAFT, "reason": f"Score: {state.validation.score}"}
+
+            # Record everything in memory regardless
             MemoryService.prospects.record_outreach(name=state.target_prospect, company=state.target_company, channel=state.channel.value, stage=state.stage.value, hook_used=state.strategy.primary_hook if state.strategy else "", angle_used=state.strategy.angle if state.strategy else "", offer_name=state.selected_offer.offer_name if state.selected_offer else "", message_sent=state.draft.body if state.draft else "")
             MemoryService.learning.record_generation(quality_score=state.validation.score, channel=state.channel.value, stage=state.stage.value, template=state.personality.base_template.value)
             if state.selected_offer:

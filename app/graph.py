@@ -110,7 +110,7 @@ def route_after_planner(data: GraphState) -> str:
 
 def route_after_critic(data: GraphState) -> str:
     status = data.get("status")
-    if status in (Status.COMPLETE.value, Status.FAILED.value):
+    if status in (Status.COMPLETE.value, Status.FAILED.value, Status.AWAITING_HUMAN.value):
         return END
     if status == Status.REVISING.value:
         return "writer"

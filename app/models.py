@@ -11,8 +11,9 @@ class Status(str, Enum):
     RESEARCHING = "researching"
     STRATEGIZING = "strategizing"
     WRITING = "writing"
-    REVISING = "revising" 
+    REVISING = "revising"
     VALIDATING = "validating"
+    AWAITING_HUMAN = "awaiting_human"
     COMPLETE = "complete"
     FAILED = "failed"
 
@@ -125,6 +126,12 @@ class Personality(BaseModel):
         description="Stage-specific instruction overrides keyed by stage name"
     )
 
+    # Past messages written by the sender — used to emulate their voice
+    voice_samples: List[str] = Field(
+        default=[],
+        description="3-5 real messages previously written by the sender. The writer will analyze and match their natural style, vocabulary, and tone."
+    )
+
 # ----------------------------
 # COMPANY DETAILS BLOCK
 # ----------------------------
@@ -204,6 +211,29 @@ class Validation(BaseModel):
     score: int = 0
     warnings: List[str] = []
     suggested_fixes: Optional[str] = None
+
+# ----------------------------
+# HUMAN REVIEW MODELS
+# ----------------------------
+
+class HumanDecision(BaseModel):
+    approved: bool = Field(..., description="True to send, False to reject and rewrite")
+    feedback: Optional[str] = Field(
+        None,
+        description="If rejected, explain what to fix. If approved with email/linkedin channel, optionally override recipient."
+    )
+    prospect_email: Optional[str] = Field(None, description="Required for email send")
+    prospect_linkedin_id: Optional[str] = Field(None, description="Unipile account ID for LinkedIn send")
+
+class ReviewResponse(BaseModel):
+    task_id: str
+    prospect: str
+    company: str
+    channel: str
+    message: str
+    subject: Optional[str]
+    score: int
+    warnings: List[str]
 
 # ----------------------------
 # ROOT REQUEST MODEL
