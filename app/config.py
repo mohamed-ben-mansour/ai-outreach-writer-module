@@ -14,7 +14,8 @@ class Settings(BaseSettings):
     
     # Google Gemini
     GOOGLE_API_KEY: str
-    GEMINI_MODEL: str = "gemini-2.5-flash"
+    GEMINI_MODEL: str = "gemini-2.5-flash-lite-preview-06-17"
+    GEMINI_FALLBACK_MODEL: str = "models/gemma-3-27b-it"
     GEMINI_TEMPERATURE: float = 0.7
     GEMINI_MAX_TOKENS: int = 2048
     

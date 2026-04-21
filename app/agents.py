@@ -252,7 +252,6 @@ class AgentNodes:
             return state
 
         try:
-            # This part is unchanged - it just calls the LLM
             validation_result = llm_service.validate_message(
                 message=state.draft.body,
                 prospect_name=state.target_prospect,
@@ -260,18 +259,35 @@ class AgentNodes:
                 personality=state.personality
             )
             state.llm_calls.append({"step": "critic", "purpose": "validate_message", "output": validation_result})
+
+            # Post-LLM rule checks — these are deterministic and override the LLM
+            extra_issues: List[str] = []
             if ReasoningTools.detect_overpersonalization(state.draft.body):
-                validation_result["warnings"].append("Overpersonalization detected")
+                extra_issues.append("Remove overly personal references that may feel intrusive.")
                 validation_result["score"] = max(0, validation_result["score"] - 20)
-                validation_result["valid"] = False
             for phrase in state.personality.never_use_phrases:
                 if phrase.lower() in state.draft.body.lower():
-                    validation_result["warnings"].append(f"Banned phrase found: '{phrase}'")
+                    extra_issues.append(f"Remove banned phrase: '{phrase}'.")
                     validation_result["score"] = max(0, validation_result["score"] - 10)
-                    validation_result["valid"] = False
+            if ReasoningTools.detect_placeholder_text(state.draft.body):
+                extra_issues.append("Remove all placeholder text like [Company], [Name], [Result] — use only real data or omit entirely.")
+                validation_result["score"] = max(0, validation_result["score"] - 40)
+
+            if extra_issues:
+                validation_result["warnings"].extend(extra_issues)
+                validation_result["valid"] = False
+                # Append to suggested_fixes so the writer knows what to fix
+                existing_fixes = validation_result.get("suggested_fixes") or ""
+                combined = (existing_fixes + " " + " | ".join(extra_issues)).strip()
+                validation_result["suggested_fixes"] = combined
+
+            # Final safety: if score is below threshold, force valid=False
+            if validation_result.get("score", 0) < settings.MIN_QUALITY_SCORE:
+                validation_result["valid"] = False
+
             state.validation = Validation(**validation_result)
         except Exception as e:
-            state.validation = Validation(valid=True, score=75, warnings=["Validation LLM call failed, using basic checks"], suggested_fixes=None)
+            state.validation = Validation(valid=False, score=0, warnings=[f"Validation failed: {str(e)}"], suggested_fixes="Rewrite the message from scratch.")
             state.memory["critic_error"] = str(e)
 
         # --- UPDATED: Refinement Logic ---
@@ -287,8 +303,8 @@ class AgentNodes:
             if state.selected_offer:
                 MemoryService.offers.record_usage(offer_name=state.selected_offer.offer_name, channel=state.channel.value, angle=state.strategy.angle if state.strategy else "", prospect_role=state.prospect_role, quality_score=state.validation.score)
 
-        # Case 2: Validation failed, but we have specific fixes to try (and haven't hit max retries)
-        elif state.validation.suggested_fixes and state.iteration_count < state.max_iterations:
+        # Case 2: Validation failed, but we have specific fixes to try (and haven't exhausted retries)
+        elif state.validation.suggested_fixes and state.iteration_count <= state.max_iterations:
             state.status = Status.REVISING  # Tell the orchestrator to go back to the writer
             state.iteration_count += 1
             state.next_action = {

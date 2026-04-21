@@ -1,11 +1,14 @@
-from fastapi import FastAPI, HTTPException
+from fastapi import FastAPI, HTTPException, Request
 from fastapi.middleware.cors import CORSMiddleware
+from fastapi.responses import Response
 from typing import List
 import logging
 
 from .models import AgentState, GenerateRequest, Status
 from .orchestrator import PipelineOrchestrator
 from .config import settings
+from .mcp_server import app as mcp_app
+from mcp.server.sse import SseServerTransport
 
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
 logger = logging.getLogger(__name__)
@@ -24,6 +27,31 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
+# MCP SSE transport — external agents connect to /mcp
+sse_transport = SseServerTransport("/mcp/messages")
+
+
+@app.get("/mcp")
+async def mcp_sse_endpoint(request: Request):
+    """SSE endpoint for MCP agent-to-agent connections."""
+    async with sse_transport.connect_sse(
+        request.scope, request.receive, request.send
+    ) as streams:
+        await mcp_app.run(
+            streams[0], streams[1], mcp_app.create_initialization_options()
+        )
+    return Response()
+
+
+@app.post("/mcp/messages")
+async def mcp_messages(request: Request):
+    """Message posting endpoint required by the SSE transport."""
+    await sse_transport.handle_post_message(
+        request.scope, request.receive, request.send
+    )
+    return Response()
+
+
 @app.get("/")
 async def root():
     return {
@@ -34,17 +62,15 @@ async def root():
         "using_mock_data": settings.USE_MOCK_DATA
     }
 
+
 @app.post("/api/generate", response_model=List[AgentState])
 async def generate_outreach(request: GenerateRequest):
-    """
-    Full pipeline. Returns step-by-step history of agent states.
-    """
+    """Full pipeline. Returns step-by-step history of agent states."""
     try:
         logger.info(
             f"Generating for {request.target_prospect} at {request.target_company} "
             f"| channel={request.channel} stage={request.stage} intent={request.intent}"
         )
-
         orchestrator = PipelineOrchestrator(
             target_prospect=request.target_prospect,
             target_company=request.target_company,
@@ -56,26 +82,21 @@ async def generate_outreach(request: GenerateRequest):
             company_details=request.company_details,
             selected_offer=request.selected_offer
         )
-
         history = orchestrator.run_full_pipeline()
         final = history[-1]
-
         logger.info(
             f"Done | status={final.status} "
             f"score={final.validation.score if final.validation else 'N/A'}"
         )
-
         return history
-
     except Exception as e:
         logger.error(f"Pipeline failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
 
+
 @app.post("/api/generate/simple")
 async def generate_simple(request: GenerateRequest):
-    """
-    Same pipeline but returns only the final message.
-    """
+    """Same pipeline but returns only the final message."""
     try:
         orchestrator = PipelineOrchestrator(
             target_prospect=request.target_prospect,
@@ -88,7 +109,6 @@ async def generate_simple(request: GenerateRequest):
             company_details=request.company_details,
             selected_offer=request.selected_offer
         )
-
         history = orchestrator.run_full_pipeline()
         final = history[-1]
 
@@ -112,10 +132,10 @@ async def generate_simple(request: GenerateRequest):
                 "score": final.validation.score if final.validation else None,
                 "warnings": final.validation.warnings if final.validation else []
             }
-
     except Exception as e:
         logger.error(f"Simple generation failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
 
 if __name__ == "__main__":
     import uvicorn

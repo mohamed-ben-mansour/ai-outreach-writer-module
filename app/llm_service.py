@@ -524,6 +524,7 @@ import google.generativeai as genai
 import time
 from typing import Optional, Dict, Any, List
 import json
+from tenacity import retry, wait_exponential, stop_after_attempt, retry_if_exception
 from .config import settings
 from .models import (
     Signal, Strategy, Personality, CompanyDetails,
@@ -535,23 +536,43 @@ class LLMService:
 
     def __init__(self):
         genai.configure(api_key=settings.GOOGLE_API_KEY)
+        model_config = {
+            "temperature": settings.GEMINI_TEMPERATURE,
+            "max_output_tokens": settings.GEMINI_MAX_TOKENS,
+        }
         self.model = genai.GenerativeModel(
             model_name=settings.GEMINI_MODEL,
-            generation_config={
-                "temperature": settings.GEMINI_TEMPERATURE,
-                "max_output_tokens": settings.GEMINI_MAX_TOKENS,
-            }
+            generation_config=model_config
+        )
+        self.fallback_model = genai.GenerativeModel(
+            model_name=settings.GEMINI_FALLBACK_MODEL,
+            generation_config=model_config
         )
 
+    def _is_rate_limit_error(self, exc: Exception) -> bool:
+        """Detect 429 / quota errors from Gemini"""
+        msg = str(exc).lower()
+        return "429" in msg or "quota" in msg or "resource_exhausted" in msg
+
+    @retry(
+        retry=retry_if_exception(lambda e: "429" in str(e) or "quota" in str(e).lower() or "resource_exhausted" in str(e).lower()),
+        wait=wait_exponential(multiplier=1, min=20, max=120),
+        stop=stop_after_attempt(4),
+        reraise=True
+    )
     def _call_llm(self, prompt: str, system_instruction: Optional[str] = None) -> str:
-        """Make a call to Gemini and return raw text response"""
+        """Call primary model, fall back to fallback_model on any error."""
+        full_prompt = f"{system_instruction}\n\n{prompt}" if system_instruction else prompt
         try:
-            full_prompt = f"{system_instruction}\n\n{prompt}" if system_instruction else prompt
-            response = self.model.generate_content(full_prompt)
-            time.sleep(1) # Rate limit safety
-            return response.text
-        except Exception as e:
-            raise Exception(f"LLM call failed: {str(e)}")
+            return self.model.generate_content(full_prompt).text
+        except Exception as primary_err:
+            try:
+                return self.fallback_model.generate_content(full_prompt).text
+            except Exception as fallback_err:
+                raise Exception(
+                    f"Both models failed. Primary ({settings.GEMINI_MODEL}): {primary_err} | "
+                    f"Fallback ({settings.GEMINI_FALLBACK_MODEL}): {fallback_err}"
+                )
 
     def _parse_json(self, raw: str) -> dict:
         """
@@ -691,13 +712,11 @@ Return JSON: {{"primary_hook": "...", "secondary_hook": "...", "reasoning": "...
 TARGET: {prospect_name} {role_context} at {company}
 PRIMARY HOOK: {primary_hook}
 SECONDARY HOOK: {secondary_hook}
-{self._build_personality_block(personality, stage)}
-{self._build_company_block(company_details)}
-{self._build_offer_block(selected_offer)}
+STYLE: {personality.base_template.value} | CHANNEL: {channel.value} | STAGE: {stage.value}
+SENDER: {company_details.company_name}{f" — {company_details.elevator_pitch}" if company_details.elevator_pitch else ""}
+OFFER: {selected_offer.offer_name}{f" — {selected_offer.solution_summary}" if selected_offer.solution_summary else ""}
 {self._build_channel_instructions(channel, stage, intent)}{memory_context}
-Create a strategy with:
-1. A specific ANGLE (how to position the conversation)
-2. REASONING for why this approach will work for THIS person
+Return a concise strategy. Reasoning must be under 80 words.
 Return JSON: {{"angle": "...", "reasoning": "..."}}"""
         try:
             response = self._call_llm(prompt, system_instruction="You are a sales strategy expert. Always return valid JSON only. All JSON string values must be properly escaped. No markdown.")
@@ -734,40 +753,33 @@ Return JSON: {{"angle": "...", "reasoning": "..."}}"""
         # --- NEW: Build the revision block if applicable ---
         revision_block = ""
         if is_revision and previous_draft and feedback_from_critic:
-            revision_block = f"""
-REVISION REQUIRED:
-Your previous attempt was rejected.
-PREVIOUS DRAFT:
-"{previous_draft}"
-
-REASON FOR REJECTION / FEEDBACK TO IMPLEMENT:
-"{feedback_from_critic}"
-
-You MUST fix the issues mentioned in the feedback. Create a better, revised version that incorporates the suggestions. Do not repeat the same mistakes.
-"""
+            prev_len = len(previous_draft)
+            revision_block = f"""REVISION REQUIRED — your previous draft was rejected.
+PREVIOUS DRAFT ({prev_len} chars): "{previous_draft}"
+FEEDBACK: {feedback_from_critic}
+Fix exactly what the feedback says. Do not change anything else. Do not rewrite from scratch."""
         
-        prompt = f"""You are writing a personalized outreach message.
+        prompt = f"""Write a personalized outreach message.
 {revision_block}
 TARGET: {prospect_name} {role_context} at {company}
-STRATEGY:
-- Primary Hook: {strategy.primary_hook}
-- Secondary Hook: {strategy.secondary_hook}
-- Angle: {strategy.angle}
-- Strategic Reasoning: {strategy.reasoning}
-{self._build_personality_block(personality, stage)}
-{self._build_company_block(company_details)}
-{self._build_offer_block(selected_offer)}
+HOOK: {strategy.primary_hook} | ANGLE: {strategy.angle}
+STYLE: {personality.base_template.value} | URGENCY: {personality.urgency_level}/10 | HUMOR: {personality.humor_sarcasm}/10
+{f"TRAITS: {', '.join(personality.personality_traits)}" if personality.personality_traits else ""}
+{f"MUST USE: {', '.join(personality.always_include_phrases)}" if personality.always_include_phrases else ""}
+{f"NEVER USE: {', '.join(personality.never_use_phrases)}" if personality.never_use_phrases else ""}
+SENDER: {company_details.company_name}{f" — {company_details.elevator_pitch}" if company_details.elevator_pitch else ""}
+OFFER: {selected_offer.offer_name}{f" — {selected_offer.solution_summary}" if selected_offer.solution_summary else ""}
+{f"SOCIAL PROOF (use these exact names/numbers, never invent placeholders): {' | '.join(company_details.social_proof)}" if company_details.social_proof else "NO SOCIAL PROOF PROVIDED — do not invent company names, results, or placeholders like [Similar Company] or [Client Name]. Omit social proof entirely if you have none."}
+CTA: {selected_offer.cta or "soft question"}
+CHANNEL: {channel.value} | STAGE: {stage.value}
 {self._build_channel_instructions(channel, stage, intent)}
-CONTACT HISTORY:
 {memory_block}
 HARD REQUIREMENTS:
-- Length: {min_len} to {max_len} characters
-- Hit exactly {personality.touchdowns_per_message} distinct touchpoints
-- Never use: {', '.join(personality.never_use_phrases) if personality.never_use_phrases else 'nothing banned'}
-- Must include naturally: {', '.join(personality.always_include_phrases) if personality.always_include_phrases else 'no required phrases'}
-{"- Include a subject line" if include_subject else "- No subject line needed"}
-Write the message now.
-Return JSON: {{"body": "...", "subject": {"\"...\"" if include_subject else "null"}, "sentence_breakdown": [{{"text": "...", "purpose": "...", "driven_by": [...]}}]}}"""
+- Length: {min_len}-{max_len} characters (STRICT — the message will be rejected if outside this range)
+- Exactly {personality.touchdowns_per_message} distinct touchpoints
+- NEVER use placeholder text like [Company], [Name], [Result], or any bracketed stand-ins. Use only real data provided above.
+{"- Include a subject line" if include_subject else "- No subject line"}
+Return JSON: {{"body": "...", "subject": {"\"...\"" if include_subject else "null"}, "sentence_breakdown": [{{"text": "...", "purpose": "hook|credibility|value|cta", "driven_by": [...]}}]}}"""
         try:
             response = self._call_llm(prompt, system_instruction="You are an expert sales copywriter. Write authentic human messages. Always return valid JSON only. All JSON string values must be properly escaped. No markdown.")
             return self._parse_json(response)
@@ -775,7 +787,6 @@ Return JSON: {{"body": "...", "subject": {"\"...\"" if include_subject else "nul
             fallback = f"Hi {prospect_name}, came across your work at {company} and wanted to connect."
             return {"body": fallback, "subject": None, "sentence_breakdown": [{"text": fallback, "purpose": "general", "driven_by": ["fallback"]}], "error": str(e)}
 
-    # --- UNCHANGED validate_message FUNCTION ---
     def validate_message(
         self,
         message: str,
@@ -783,43 +794,52 @@ Return JSON: {{"body": "...", "subject": {"\"...\"" if include_subject else "nul
         channel: Channel,
         personality: Personality
     ) -> Dict[str, Any]:
-        # This function is fine, no changes needed for this task
-        # Using your exact existing code
         channel_limits = {Channel.LINKEDIN_DM: (50, 300), Channel.LINKEDIN_INMAIL: (100, 600), Channel.EMAIL: (100, 800), Channel.TWITTER_DM: (20, 280), Channel.SMS: (20, 160)}
         min_len, max_len = channel_limits.get(channel, (50, 300))
+        char_count = len(message)
+
+        # --- Run hard rule checks FIRST, before touching the LLM ---
+        hard_failures: List[str] = []
+        if char_count > max_len:
+            hard_failures.append(f"Too long: {char_count} chars, max is {max_len}. Shorten by {char_count - max_len} characters.")
+        if char_count < min_len:
+            hard_failures.append(f"Too short: {char_count} chars, min is {min_len}. Add at least {min_len - char_count} characters.")
+        for phrase in personality.never_use_phrases:
+            if phrase.lower() in message.lower():
+                hard_failures.append(f"Banned phrase used: '{phrase}'. Remove it.")
+
+        # If hard rules already fail, skip the LLM call entirely — save tokens
+        if hard_failures:
+            penalty = min(len(hard_failures) * 20, 60)
+            return {
+                "score": max(0, 100 - penalty),
+                "warnings": hard_failures,
+                "suggested_fixes": " | ".join(hard_failures),
+                "valid": False
+            }
+
+        # --- Only call LLM when hard rules pass ---
         banned = ', '.join(personality.never_use_phrases) if personality.never_use_phrases else "none"
         required = ', '.join(personality.always_include_phrases) if personality.always_include_phrases else "none"
         prompt = f"""Evaluate this outreach message for quality.
-MESSAGE:
-{message}
-TARGET: {prospect_name}
-CHANNEL: {channel.value}
-CHARACTER COUNT: {len(message)}
-REQUIRED LENGTH: {min_len} to {max_len} characters
-BANNED PHRASES: {banned}
-REQUIRED PHRASES: {required}
-TOUCHDOWNS REQUIRED: {personality.touchdowns_per_message}
-Check for:
-1. Length compliance
-2. Banned phrases present
-3. Required phrases missing
-4. Generic/templated language
-5. Overpersonalization (creepy)
-6. Clarity of CTA
-7. Authenticity
-8. Correct number of touchdowns
-Score 0-100. Be strict.
-Return JSON: {{"score": 85, "warnings": [...], "suggested_fixes": "...", "valid": true}}"""
+MESSAGE: {message}
+CHANNEL: {channel.value} | CHAR COUNT: {char_count} | REQUIRED: {min_len}-{max_len} chars
+BANNED PHRASES: {banned} | REQUIRED PHRASES: {required} | TOUCHDOWNS REQUIRED: {personality.touchdowns_per_message}
+Check ONLY: missing required phrases, CTA clarity, authenticity, correct touchdown count.
+Do NOT flag: length (already verified), style preferences, word choice, tone subjectivity.
+Only flag issues that would make a real sales rep embarrassed to send this message.
+IMPORTANT: If score >= {settings.MIN_QUALITY_SCORE}, you MUST set valid to true. Only set valid to false if there is a concrete, fixable problem (missing CTA, wrong touchdown count, required phrase absent, placeholder text).
+Score 0-100.
+Return JSON: {{"score": 85, "warnings": ["concrete issues only, empty list if none"], "suggested_fixes": "one concise actionable sentence, or null if none", "valid": true}}"""
+
         try:
-            response = self._call_llm(prompt, system_instruction="You are a message quality expert. Always return valid JSON only. All JSON string values must be properly escaped. No markdown.")
-            return self._parse_json(response)
+            response = self._call_llm(prompt, system_instruction="You are a message quality expert. Return valid JSON only. No markdown.")
+            result = self._parse_json(response)
+            # LLM's valid opinion wins, but a low score always overrides to False
+            if result.get("score", 0) < settings.MIN_QUALITY_SCORE:
+                result["valid"] = False
+            return result
         except Exception as e:
-            warnings = [f"Validation LLM failed: {str(e)}"]
-            score = 100
-            if len(message) > max_len: warnings.append(f"Too long by {len(message) - max_len} characters"); score -= 15
-            if len(message) < min_len: warnings.append(f"Too short by {min_len - len(message)} characters"); score -= 15
-            for phrase in personality.never_use_phrases:
-                if phrase.lower() in message.lower(): warnings.append(f"Banned phrase detected: '{phrase}'"); score -= 10
-            return {"score": score, "warnings": warnings, "suggested_fixes": "Review issues" if warnings else None, "valid": score >= settings.MIN_QUALITY_SCORE}
+            return {"score": 70, "warnings": [f"Validation LLM failed: {str(e)}"], "suggested_fixes": "Manual review needed", "valid": False}
 
 llm_service = LLMService()

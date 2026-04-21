@@ -130,6 +130,12 @@ class ReasoningTools:
         return min(score, 95)
     
     @staticmethod
+    def detect_placeholder_text(message: str) -> bool:
+        """Detect unfilled placeholder tokens like [Company], [Name], [Result], etc."""
+        import re
+        return bool(re.search(r'\[.{1,40}\]', message))
+
+    @staticmethod
     def detect_overpersonalization(message: str) -> bool:
         """Enhanced creepiness detection"""
         creepy_phrases = [
@@ -142,6 +148,5 @@ class ReasoningTools:
             "i followed you",
             "stalking your profile"
         ]
-        
         message_lower = message.lower()
         return any(phrase in message_lower for phrase in creepy_phrases)
