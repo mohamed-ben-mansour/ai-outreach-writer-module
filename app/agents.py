@@ -273,6 +273,12 @@ class AgentNodes:
                 extra_issues.append("Remove all placeholder text like [Company], [Name], [Result] — use only real data or omit entirely.")
                 validation_result["score"] = max(0, validation_result["score"] - 40)
 
+            # Detect hallucinated attachment/link references
+            attachment_phrases = ["i've attached", "i have attached", "see attached", "i'm sending", "i'll send", "check out the link", "i sent you"]
+            if any(p in state.draft.body.lower() for p in attachment_phrases):
+                extra_issues.append("Remove attachment/link references — this is a plain text message, you cannot attach or send files.")
+                validation_result["score"] = max(0, validation_result["score"] - 30)
+
             if extra_issues:
                 validation_result["warnings"].extend(extra_issues)
                 validation_result["valid"] = False

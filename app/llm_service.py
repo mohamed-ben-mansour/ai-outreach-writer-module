@@ -799,14 +799,29 @@ CHANNEL: {channel.value} | STAGE: {stage.value}
 {self._build_channel_instructions(channel, stage, intent)}
 {memory_block}
 HARD REQUIREMENTS:
-- Length: {min_len}-{max_len} characters (STRICT — the message will be rejected if outside this range)
+- Length: {min_len}-{max_len} characters (STRICT — count every character including spaces. The message will be AUTOMATICALLY REJECTED if it exceeds {max_len} chars. When in doubt, write shorter.)
 - Exactly {personality.touchdowns_per_message} distinct touchpoints
 - NEVER use placeholder text like [Company], [Name], [Result], or any bracketed stand-ins. Use only real data provided above.
+- NEVER say "I've attached", "see attached", "I'm sending", "I'll send", "check out the link", or imply you are sending files, links, or attachments. You are writing a plain text message only.
 {"- Include a subject line" if include_subject else "- No subject line"}
 Return JSON: {{"body": "...", "subject": {"\"...\"" if include_subject else "null"}, "sentence_breakdown": [{{"text": "...", "purpose": "hook|credibility|value|cta", "driven_by": [...]}}]}}"""
         try:
             response = self._call_llm(prompt, system_instruction="You are an expert sales copywriter. Write authentic human messages. Always return valid JSON only. All JSON string values must be properly escaped. No markdown.")
-            return self._parse_json(response)
+            result = self._parse_json(response)
+
+            # Hard trim: if LLM still overshoots, cut at last sentence boundary within limit
+            body = result.get("body", "")
+            if len(body) > max_len:
+                trimmed = body[:max_len]
+                # Try to cut at last sentence-ending punctuation to avoid mid-sentence cuts
+                for punct in ("?", "!", "."):
+                    last = trimmed.rfind(punct)
+                    if last > min_len:
+                        trimmed = trimmed[:last + 1]
+                        break
+                result["body"] = trimmed
+
+            return result
         except Exception as e:
             fallback = f"Hi {prospect_name}, came across your work at {company} and wanted to connect."
             return {"body": fallback, "subject": None, "sentence_breakdown": [{"text": fallback, "purpose": "general", "driven_by": ["fallback"]}], "error": str(e)}

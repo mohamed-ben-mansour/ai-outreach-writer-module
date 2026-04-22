@@ -35,10 +35,10 @@
 - [ ] Wire real CRM in `ResearchTools.get_crm_history`
 
 ### Memory
-- [ ] Swap `_InMemoryStore` for Redis (`redis-py`) — interface already designed for this
-- [ ] Add reply tracking — call `MemoryService.prospects.mark_replied()` when a reply comes in
-- [ ] Feed reply data back into `LearningMemoryService` to improve hook/angle selection
+- [x] Swap `_InMemoryStore` for Redis (`redis-py`) — interface already designed for this
+- [x] Add reply tracking — call `MemoryService.prospects.mark_replied()` when a reply comes in via `POST /api/reply`
+- [x] Feed reply data back into `LearningMemoryService` to improve hook/angle selection
 
 ### Infra
-- [x] Add `Dockerfile` + `docker-compose.yml`
-- [ ] Add Redis service to docker-compose when memory persistence is wired
+- [x] Add `Dockerfile` + `docker-compose.yml` (app + Redis)
+- [x] Add Redis service to docker-compose when memory persistence is wired

@@ -10,6 +10,7 @@ from .config import settings
 from .mcp_server import app as mcp_app
 from .send_tools import send_email, send_linkedin_dm
 from .graph import run_pipeline
+from .memory import MemoryService
 from mcp.server.sse import SseServerTransport
 
 logging.basicConfig(level=getattr(logging, settings.LOG_LEVEL))
@@ -154,6 +155,25 @@ async def generate_simple(request: GenerateRequest):
     except Exception as e:
         logger.error(f"Simple generation failed: {str(e)}", exc_info=True)
         raise HTTPException(status_code=500, detail=str(e))
+
+
+@app.post("/api/reply")
+async def record_reply(
+    prospect_name: str,
+    prospect_company: str,
+    sentiment: str = "positive"
+):
+    """
+    Call this when a prospect replies to a message.
+    Updates prospect memory and feeds the learning system.
+    sentiment: positive | negative | neutral
+    """
+    MemoryService.prospects.mark_replied(
+        name=prospect_name,
+        company=prospect_company,
+        sentiment=sentiment
+    )
+    return {"success": True, "message": f"Reply recorded for {prospect_name} at {prospect_company}"}
 
 
 @app.get("/api/review/{task_id}", response_model=ReviewResponse)

@@ -19,6 +19,9 @@ class Settings(BaseSettings):
     GEMINI_TEMPERATURE: float = 0.7
     GEMINI_MAX_TOKENS: int = 2048
     
+    # Redis
+    REDIS_URL: Optional[str] = None           # e.g. redis://localhost:6379/0 — leave empty to use in-memory fallback
+
     # Research Tools
     USE_MOCK_DATA: bool = True
     LINKEDIN_API_KEY: Optional[str] = None

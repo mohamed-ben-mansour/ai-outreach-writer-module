@@ -1,19 +1,18 @@
 """
 Memory layer for the Agentic Outreach system.
 
-Current backend: In-process Python dictionaries (lost on restart)
-Future backend:  Redis, PostgreSQL, or any persistent store
+Backend: Redis (persistent across restarts)
+Fallback: In-process dict if Redis is not configured (USE_REDIS=false)
 
-To swap backends later:
-- Keep the MemoryService interface exactly as is
-- Replace the contents of ProspectMemoryBackend, LearningMemoryBackend, OfferMemoryBackend
-- Nothing else in the codebase needs to change
+To swap back to in-memory, set USE_REDIS=false in .env.
 """
 
 import json
+import redis
 from typing import Optional, List, Dict, Any
 from datetime import datetime
 from pydantic import BaseModel, Field
+from .config import settings
 
 # ----------------------------
 # MEMORY SCHEMAS
@@ -105,54 +104,61 @@ class OfferMemoryRecord(BaseModel):
 
 
 # ----------------------------
-# BACKEND: PLACEHOLDER (IN-MEMORY)
-# Replace this entire section with Redis/Postgres later
-# The interface (method names and signatures) must stay the same
+# BACKEND
 # ----------------------------
 
 class _InMemoryStore:
-    """
-    Temporary in-process store.
-    Data lives as long as the server process lives.
-    Restart the server = all memory gone.
-    
-    REPLACE WITH REDIS:
-        client = redis.Redis(host=..., port=..., db=0)
-        client.set(key, json.dumps(value))
-        client.get(key)
-        client.expire(key, ttl_seconds)
-    
-    REPLACE WITH POSTGRES:
-        Use SQLAlchemy or asyncpg
-        Store JSON blobs in a jsonb column
-    """
-    
+    """Fallback when Redis is not configured."""
     def __init__(self):
         self._store: Dict[str, str] = {}
-    
+
     def set(self, key: str, value: dict) -> None:
         self._store[key] = json.dumps(value, default=str)
-    
+
     def get(self, key: str) -> Optional[dict]:
         raw = self._store.get(key)
-        if raw is None:
-            return None
-        return json.loads(raw)
-    
+        return json.loads(raw) if raw else None
+
     def delete(self, key: str) -> None:
         self._store.pop(key, None)
-    
+
     def exists(self, key: str) -> bool:
         return key in self._store
-    
+
     def keys_with_prefix(self, prefix: str) -> List[str]:
         return [k for k in self._store.keys() if k.startswith(prefix)]
 
 
-# Singleton store instance
-# When you swap to Redis, replace this one line:
-# _store = redis.Redis(host=settings.REDIS_HOST, port=settings.REDIS_PORT, db=0)
-_store = _InMemoryStore()
+class _RedisStore:
+    """
+    Redis-backed store. Data persists across restarts.
+    Requires REDIS_URL in .env (e.g. redis://localhost:6379/0)
+    """
+    def __init__(self, url: str):
+        self._client = redis.from_url(url, decode_responses=True)
+
+    def set(self, key: str, value: dict) -> None:
+        self._client.set(key, json.dumps(value, default=str))
+
+    def get(self, key: str) -> Optional[dict]:
+        raw = self._client.get(key)
+        return json.loads(raw) if raw else None
+
+    def delete(self, key: str) -> None:
+        self._client.delete(key)
+
+    def exists(self, key: str) -> bool:
+        return bool(self._client.exists(key))
+
+    def keys_with_prefix(self, prefix: str) -> List[str]:
+        return self._client.keys(f"{prefix}*")
+
+
+# Pick backend based on config
+if settings.REDIS_URL:
+    _store = _RedisStore(settings.REDIS_URL)
+else:
+    _store = _InMemoryStore()
 
 
 # ----------------------------
@@ -246,11 +252,21 @@ class ProspectMemoryService:
     
     @staticmethod
     def mark_replied(name: str, company: str, sentiment: str = "positive") -> None:
-        """Call this when a prospect replies (future feature)"""
+        """Call this when a prospect replies. Updates prospect record and feeds learning."""
         record = ProspectMemoryService.get_or_create(name, company)
         record.ever_replied = True
         record.reply_sentiment = sentiment
         ProspectMemoryService.save(record)
+
+        # Feed back into learning so the system gets smarter over time
+        if record.hooks_used:
+            LearningMemoryService.record_reply(
+                hook=record.hooks_used[-1],
+                angle=record.angles_tried[-1] if record.angles_tried else "",
+                channel=record.last_channel_used or "",
+                stage=record.last_stage_used or "",
+                sentiment=sentiment,
+            )
     
     @staticmethod
     def mark_do_not_contact(name: str, company: str) -> None:
@@ -307,6 +323,46 @@ class LearningMemoryService:
         
         LearningMemoryService.save(record)
     
+    @staticmethod
+    def record_reply(
+        hook: str,
+        angle: str,
+        channel: str,
+        stage: str,
+        sentiment: str = "positive",
+    ) -> None:
+        """
+        Call when a prospect replies.
+        Updates reply rates and promotes/demotes hooks and angles.
+        """
+        record = LearningMemoryService.get()
+        record.total_replies_received += 1
+
+        # Update reply rates (simple increment — divide by total_messages_sent for real rate)
+        if channel:
+            prev = record.channel_reply_rates.get(channel, 0.0)
+            record.channel_reply_rates[channel] = round(prev + 0.01, 4)
+
+        if stage:
+            prev = record.stage_reply_rates.get(stage, 0.0)
+            record.stage_reply_rates[stage] = round(prev + 0.01, 4)
+
+        # Promote or demote hooks/angles based on sentiment
+        if sentiment == "positive":
+            if hook and hook not in record.best_performing_hooks:
+                record.best_performing_hooks.append(hook)
+            if hook in record.worst_performing_hooks:
+                record.worst_performing_hooks.remove(hook)
+            if angle and angle not in record.best_performing_angles:
+                record.best_performing_angles.append(angle)
+        else:
+            if hook and hook not in record.worst_performing_hooks:
+                record.worst_performing_hooks.append(hook)
+            if angle and angle not in record.worst_performing_angles:
+                record.worst_performing_angles.append(angle)
+
+        LearningMemoryService.save(record)
+
     @staticmethod
     def record_successful_hook(hook: str) -> None:
         """Call when a hook leads to a reply"""
